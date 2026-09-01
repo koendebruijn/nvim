@@ -247,7 +247,7 @@ require('lazy').setup({
   { -- Fuzzy Finder (files, lsp, etc)
     'nvim-telescope/telescope.nvim',
     event = 'VimEnter',
-    branch = '0.1.x',
+    branch = 'master', -- NOTE: '0.1.x' is frozen (last commit 2024-05) and predates the previewer's move to core `vim.treesitter` APIs, causing errors with the new nvim-treesitter
     dependencies = {
       'nvim-lua/plenary.nvim',
       { -- If encountering errors, see telescope-fzf-native README for installation instructions
@@ -475,7 +475,7 @@ require('lazy').setup({
           --
           -- When you move your cursor, the highlights will be cleared (the second autocommand).
           local client = vim.lsp.get_client_by_id(event.data.client_id)
-          if client and client.supports_method(vim.lsp.protocol.Methods.textDocument_documentHighlight) then
+          if client and client:supports_method(vim.lsp.protocol.Methods.textDocument_documentHighlight) then
             local highlight_augroup = vim.api.nvim_create_augroup('kickstart-lsp-highlight', { clear = false })
             vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
               buffer = event.buf,
@@ -502,7 +502,7 @@ require('lazy').setup({
           -- code, if the language server you are using supports them
           --
           -- This may be unwanted, since they displace some of your code
-          if client and client.supports_method(vim.lsp.protocol.Methods.textDocument_inlayHint) then
+          if client and client:supports_method(vim.lsp.protocol.Methods.textDocument_inlayHint) then
             map('<leader>th', function()
               vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled { bufnr = event.buf })
             end, '[T]oggle Inlay [H]ints')
@@ -527,7 +527,19 @@ require('lazy').setup({
       --  - settings (table): Override the default settings passed when initializing the server.
       --        For example, to see the options for `lua_ls`, you could go to: https://luals.github.io/wiki/settings/
       local servers = {
-        phpantom_lsp = {},
+        intelephense = {
+          init_options = {
+            licenceKey = 'LICENSE_KEY',
+            globalStoragePath = os.getenv 'HOME' .. '/.local/share/intelephense',
+          },
+          settings = {
+            intelephense = {
+              format = {
+                enable = true,
+              },
+            },
+          },
+        },
         -- ... etc. See `:help lspconfig-all` for a list of all the pre-configured LSPs
         --
         -- Some languages (like typescript) have entire language plugins that can be useful:
@@ -585,13 +597,6 @@ require('lazy').setup({
           end,
         },
       }
-
-      -- mason-lspconfig doesn't map the `phpantom_lsp` mason package to its
-      -- lspconfig server name yet, so the handler above skips it. Enable it
-      -- directly via the native API; nvim-lspconfig ships the server
-      -- definition under lsp/phpantom_lsp.lua.
-      vim.lsp.config('phpantom_lsp', { capabilities = capabilities })
-      vim.lsp.enable 'phpantom_lsp'
 
       -- kotlin-lsp (JetBrains' official Kotlin LSP, https://github.com/Kotlin/kotlin-lsp)
       -- isn't a Mason package, so it's enabled manually here rather than
@@ -833,22 +838,54 @@ require('lazy').setup({
   },
   { -- Highlight, edit, and navigate code
     'nvim-treesitter/nvim-treesitter',
+    branch = 'main', -- NOTE: 'master' is incompatible with Neovim >= 0.12; 'main' is the rewritten, supported branch
+    lazy = false,
     build = ':TSUpdate',
-    main = 'nvim-treesitter.configs', -- Sets main module to use for opts
-    -- [[ Configure Treesitter ]] See `:help nvim-treesitter`
-    opts = {
-      ensure_installed = { 'javascript', 'php', 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' },
-      -- Autoinstall languages that are not installed
-      auto_install = true,
-      highlight = {
-        enable = true,
-        -- Some languages depend on vim's regex highlighting system (such as Ruby) for indent rules.
-        --  If you are experiencing weird indenting issues, add the language to
-        --  the list of additional_vim_regex_highlighting and disabled languages for indent.
-        additional_vim_regex_highlighting = { 'ruby' },
-      },
-      indent = { enable = true, disable = { 'ruby' } },
-    },
+    -- [[ Configure Treesitter ]] See `:help nvim-treesitter-intro`
+    config = function()
+      local parsers = { 'javascript', 'php', 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
+      require('nvim-treesitter').install(parsers)
+
+      ---@param buf integer
+      ---@param language string
+      local function treesitter_try_attach(buf, language)
+        if not vim.treesitter.language.add(language) then
+          return
+        end
+        vim.treesitter.start(buf, language)
+
+        -- Enable treesitter based indentation if an indent query exists for this
+        -- language, falling back to Vim's built-in indentexpr otherwise.
+        if vim.treesitter.query.get(language, 'indents') then
+          vim.bo[buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+        end
+      end
+
+      local available_parsers = require('nvim-treesitter').get_available()
+      vim.api.nvim_create_autocmd('FileType', {
+        callback = function(args)
+          local buf, filetype = args.buf, args.match
+
+          local language = vim.treesitter.language.get_lang(filetype)
+          if not language then
+            return
+          end
+
+          local installed_parsers = require('nvim-treesitter').get_installed 'parsers'
+
+          if vim.tbl_contains(installed_parsers, language) then
+            treesitter_try_attach(buf, language)
+          elseif vim.tbl_contains(available_parsers, language) then
+            -- Autoinstall languages that are not installed, then attach once ready
+            require('nvim-treesitter').install(language):await(function()
+              treesitter_try_attach(buf, language)
+            end)
+          else
+            treesitter_try_attach(buf, language)
+          end
+        end,
+      })
+    end,
     -- There are additional nvim-treesitter modules that you can use to interact
     -- with nvim-treesitter. You should go explore a few and see what interests you:
     --
@@ -905,8 +942,8 @@ require('lazy').setup({
 -- vim: ts=2 sts=2 sw=2 et
 
 -- Custom mapping
-vim.keymap.set({ 'n', 'v' }, '^', 'H', { noremap = true })
-vim.keymap.set({ 'n', 'v' }, '$', 'L', { noremap = true })
+vim.keymap.set({ 'n', 'v' }, 'H', '^', { noremap = true })
+vim.keymap.set({ 'n', 'v' }, 'L', '$', { noremap = true })
 
 -- recenter screen after vertical movement
 vim.keymap.set('n', '<C-d>', '<C-d>zz')
